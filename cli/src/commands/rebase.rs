@@ -27,7 +27,9 @@ use jj_lib::dag_walk;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo};
 use jj_lib::revset::{RevsetExpression, RevsetIteratorExt};
-use jj_lib::rewrite::{rebase_commit_with_options, CommitRewriter, EmptyBehaviour, RebaseOptions};
+use jj_lib::rewrite::{
+    rebase_commit_with_options, CommitRewriter, EmptyBehaviour, RebaseOptions, RebasedCommit,
+};
 use jj_lib::settings::UserSettings;
 use tracing::instrument;
 
@@ -253,6 +255,7 @@ Please use `jj rebase -d 'all:x|y'` instead of `jj rebase --allow-large-revsets 
                 &after_commits,
                 &before_commits,
                 &target_commits,
+                &rebase_options,
             )?;
         } else if !args.insert_after.is_empty() {
             let after_commits =
@@ -263,6 +266,7 @@ Please use `jj rebase -d 'all:x|y'` instead of `jj rebase --allow-large-revsets 
                 &mut workspace_command,
                 &after_commits,
                 &target_commits,
+                &rebase_options,
             )?;
         } else if !args.insert_before.is_empty() {
             let before_commits =
@@ -273,6 +277,7 @@ Please use `jj rebase -d 'all:x|y'` instead of `jj rebase --allow-large-revsets 
                 &mut workspace_command,
                 &before_commits,
                 &target_commits,
+                &rebase_options,
             )?;
         } else {
             let new_parents = workspace_command
@@ -285,6 +290,7 @@ Please use `jj rebase -d 'all:x|y'` instead of `jj rebase --allow-large-revsets 
                 &mut workspace_command,
                 &new_parents,
                 &target_commits,
+                &rebase_options,
             )?;
         }
     } else if !args.source.is_empty() {
@@ -430,6 +436,7 @@ fn rebase_revisions(
     workspace_command: &mut WorkspaceCommandHelper,
     new_parents: &[Commit],
     target_commits: &[Commit],
+    rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     if target_commits.is_empty() {
         return Ok(());
@@ -452,6 +459,7 @@ fn rebase_revisions(
         &new_parents.iter().ids().cloned().collect_vec(),
         &[],
         target_commits,
+        rebase_options,
     )
 }
 
@@ -461,6 +469,7 @@ fn rebase_revisions_after(
     workspace_command: &mut WorkspaceCommandHelper,
     after_commits: &IndexSet<Commit>,
     target_commits: &[Commit],
+    rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     workspace_command.check_rewritable(target_commits.iter().ids())?;
 
@@ -489,6 +498,7 @@ fn rebase_revisions_after(
         &new_parent_ids,
         &new_children,
         target_commits,
+        rebase_options,
     )
 }
 
@@ -498,6 +508,7 @@ fn rebase_revisions_before(
     workspace_command: &mut WorkspaceCommandHelper,
     before_commits: &IndexSet<Commit>,
     target_commits: &[Commit],
+    rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     workspace_command.check_rewritable(target_commits.iter().ids())?;
     let before_commit_ids = before_commits.iter().ids().cloned().collect_vec();
@@ -528,6 +539,7 @@ fn rebase_revisions_before(
         &new_parent_ids,
         &new_children,
         target_commits,
+        rebase_options,
     )
 }
 
@@ -538,6 +550,7 @@ fn rebase_revisions_after_before(
     after_commits: &IndexSet<Commit>,
     before_commits: &IndexSet<Commit>,
     target_commits: &[Commit],
+    rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     workspace_command.check_rewritable(target_commits.iter().ids())?;
     let before_commit_ids = before_commits.iter().ids().cloned().collect_vec();
@@ -563,6 +576,7 @@ fn rebase_revisions_after_before(
         &new_parent_ids,
         &new_children,
         target_commits,
+        rebase_options,
     )
 }
 
@@ -574,6 +588,7 @@ fn move_commits_transaction(
     new_parent_ids: &[CommitId],
     new_children: &[Commit],
     target_commits: &[Commit],
+    rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     if target_commits.is_empty() {
         return Ok(());
@@ -594,13 +609,19 @@ fn move_commits_transaction(
         num_rebased_targets,
         num_rebased_descendants,
         num_skipped_rebases,
+        num_abandoned,
     } = move_commits(
         settings,
         tx.mut_repo(),
         new_parent_ids,
         new_children,
         target_commits,
+        rebase_options,
     )?;
+    // TODO(ilyagr): Consider making it possible for descendants of the target set
+    // to become emptied, like --skip-empty. This would require writing careful
+    // tests.
+    debug_assert_eq!(num_abandoned, 0);
 
     if let Some(mut fmt) = ui.status_formatter() {
         if num_skipped_rebases > 0 {
@@ -631,6 +652,8 @@ struct MoveCommitsStats {
     /// The number of commits for which rebase was skipped, due to the commit
     /// already being in place.
     num_skipped_rebases: u32,
+    /// The number of commits which were abandoned.
+    num_abandoned: u32,
 }
 
 /// Moves `target_commits` from their current location to a new location in the
@@ -646,12 +669,14 @@ fn move_commits(
     new_parent_ids: &[CommitId],
     new_children: &[Commit],
     target_commits: &[Commit],
+    options: &RebaseOptions,
 ) -> Result<MoveCommitsStats, CommandError> {
     if target_commits.is_empty() {
         return Ok(MoveCommitsStats {
             num_rebased_targets: 0,
             num_rebased_descendants: 0,
             num_skipped_rebases: 0,
+            num_abandoned: 0,
         });
     }
 
@@ -951,12 +976,10 @@ fn move_commits(
     let mut num_rebased_targets = 0;
     let mut num_rebased_descendants = 0;
     let mut num_skipped_rebases = 0;
+    let mut num_abandoned = 0;
 
     // Rebase each commit onto its new parents in the reverse topological order
     // computed above.
-    // TODO(ilyagr): Consider making it possible for descendants of the target set
-    // to become emptied, like --skip-empty. This would require writing careful
-    // tests.
     while let Some(old_commit_id) = to_visit.pop() {
         let old_commit = to_visit_commits.get(&old_commit_id).unwrap();
         let parent_ids = to_visit_commits_new_parents
@@ -966,8 +989,10 @@ fn move_commits(
         let new_parent_ids = mut_repo.new_parents(parent_ids);
         let rewriter = CommitRewriter::new(mut_repo, old_commit.clone(), new_parent_ids);
         if rewriter.parents_changed() {
-            rewriter.rebase(settings)?.write()?;
-            if target_commit_ids.contains(&old_commit_id) {
+            let rebased_commit = rebase_commit_with_options(settings, rewriter, options)?;
+            if let RebasedCommit::Abandoned { .. } = rebased_commit {
+                num_abandoned += 1;
+            } else if target_commit_ids.contains(&old_commit_id) {
                 num_rebased_targets += 1;
             } else {
                 num_rebased_descendants += 1;
@@ -982,6 +1007,7 @@ fn move_commits(
         num_rebased_targets,
         num_rebased_descendants,
         num_skipped_rebases,
+        num_abandoned,
     })
 }
 
