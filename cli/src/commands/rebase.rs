@@ -162,26 +162,24 @@ pub(crate) struct RebaseArgs {
     /// The revision(s) to insert after (can be repeated to create a merge
     /// commit)
     ///
-    /// Only works with `-r`.
+    /// Only works with `-r` and `-s`.
     #[arg(
         long,
         short = 'A',
         visible_alias = "after",
         conflicts_with = "destination",
-        conflicts_with = "source",
         conflicts_with = "branch"
     )]
     insert_after: Vec<RevisionArg>,
     /// The revision(s) to insert before (can be repeated to create a merge
     /// commit)
     ///
-    /// Only works with `-r`.
+    /// Only works with `-r` and `-s`.
     #[arg(
         long,
         short = 'B',
         visible_alias = "before",
         conflicts_with = "destination",
-        conflicts_with = "source",
         conflicts_with = "branch"
     )]
     insert_before: Vec<RevisionArg>,
@@ -247,17 +245,14 @@ Please use `jj rebase -d 'all:x|y'` instead of `jj rebase --allow-large-revsets 
             &rebase_options,
         )?;
     } else if !args.source.is_empty() {
-        let new_parents = workspace_command
-            .resolve_some_revsets_default_single(&args.destination)?
-            .into_iter()
-            .collect_vec();
-        let source_commits = workspace_command.resolve_some_revsets_default_single(&args.source)?;
-        rebase_descendants_transaction(
+        rebase_source(
             ui,
             command.settings(),
             &mut workspace_command,
-            new_parents,
-            &source_commits,
+            &args.source,
+            &args.destination,
+            &args.insert_after,
+            &args.insert_before,
             &rebase_options,
         )?;
     } else {
@@ -318,6 +313,47 @@ fn rebase_revisions(
     )
 }
 
+fn rebase_source(
+    ui: &mut Ui,
+    settings: &UserSettings,
+    workspace_command: &mut WorkspaceCommandHelper,
+    source: &[RevisionArg],
+    destination: &[RevisionArg],
+    insert_after: &[RevisionArg],
+    insert_before: &[RevisionArg],
+    rebase_options: &RebaseOptions,
+) -> Result<(), CommandError> {
+    let source_commits = workspace_command
+        .resolve_some_revsets_default_single(source)?
+        .into_iter()
+        .collect_vec();
+    workspace_command.check_rewritable(source_commits.iter().ids())?;
+
+    let (new_parents, new_children) = compute_destination(
+        workspace_command,
+        &source_commits,
+        destination,
+        insert_after,
+        insert_before,
+        true,
+    )?;
+    if !new_children.is_empty() {
+        for commit in source_commits.iter() {
+            check_rebase_destinations(workspace_command.repo(), &new_parents, commit)?;
+        }
+    }
+
+    rebase_descendants_transaction(
+        ui,
+        settings,
+        workspace_command,
+        &new_parents.iter().ids().cloned().collect_vec(),
+        &new_children,
+        &source_commits,
+        rebase_options,
+    )
+}
+
 fn rebase_branch(
     ui: &mut Ui,
     settings: &UserSettings,
@@ -337,17 +373,23 @@ fn rebase_branch(
     let roots_expression = RevsetExpression::commits(parent_ids)
         .range(&RevsetExpression::commits(branch_commit_ids))
         .roots();
-    let root_commits: IndexSet<_> = roots_expression
+    let root_commits: Vec<_> = roots_expression
         .evaluate_programmatic(workspace_command.repo().as_ref())
         .unwrap()
         .iter()
         .commits(workspace_command.repo().store())
         .try_collect()?;
+    workspace_command.check_rewritable(root_commits.iter().ids())?;
+    for commit in root_commits.iter() {
+        check_rebase_destinations(workspace_command.repo(), &new_parents, commit)?;
+    }
+
     rebase_descendants_transaction(
         ui,
         settings,
         workspace_command,
-        new_parents,
+        &new_parents.iter().ids().cloned().collect_vec(),
+        &[],
         &root_commits,
         &rebase_options,
     )
@@ -357,17 +399,13 @@ fn rebase_descendants_transaction(
     ui: &mut Ui,
     settings: &UserSettings,
     workspace_command: &mut WorkspaceCommandHelper,
-    new_parents: Vec<Commit>,
-    target_roots: &IndexSet<Commit>,
+    new_parent_ids: &[CommitId],
+    new_children: &[Commit],
+    target_roots: &[Commit],
     rebase_options: &RebaseOptions,
 ) -> Result<(), CommandError> {
     if target_roots.is_empty() {
         return Ok(());
-    }
-
-    workspace_command.check_rewritable(target_roots.iter().ids())?;
-    for commit in target_roots.iter() {
-        check_rebase_destinations(workspace_command.repo(), &new_parents, commit)?;
     }
 
     let mut tx = workspace_command.start_transaction();
@@ -390,8 +428,6 @@ fn rebase_descendants_transaction(
             .iter()
             .commits(tx.repo().store())
             .try_collect()?;
-    let new_parent_ids = new_parents.iter().ids().cloned().collect_vec();
-    let new_children: [Commit; 0] = [];
     let target_roots = target_roots.iter().ids().cloned().collect_vec();
 
     let MoveCommitsStats {
