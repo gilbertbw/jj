@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Upgraded `scm-record` from v0.2.0 to v0.3.0. See release notes at https://github.com/arxanas/scm-record/releases/tag/v0.3.0
 
+* `jj backout` now includes the backed out commit's subject in the new commit
+  message.
+
 ### Fixed bugs
 
 * Previously, `jj git push` only made sure that the branch is in the expected

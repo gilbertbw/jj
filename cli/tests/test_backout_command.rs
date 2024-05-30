@@ -50,7 +50,9 @@ fn test_backout() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @"");
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◉  8fe4e9345020 backout of commit 2443ea76b0b1c531326908326aab7020abab8e6c
+    ◉  6d845ed9fb6a Back out "a"
+    │
+    │  This backs out commit 2443ea76b0b1c531326908326aab7020abab8e6c.
     @  2443ea76b0b1 a
     ◉  000000000000
     "###);
@@ -60,13 +62,18 @@ fn test_backout() {
     "###);
 
     // Backout the new backed-out commit
+    // The new commit message will use "Reapply" in the subject
     test_env.jj_cmd_ok(&repo_path, &["edit", "@+"]);
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["backout", "-r", "@"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @"");
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ◉  46f192066e5e backout of commit 8fe4e93450209a70a6b9cd9af612e86634fd31fd
-    @  8fe4e9345020 backout of commit 2443ea76b0b1c531326908326aab7020abab8e6c
+    ◉  8b49ace1e6e7 Reapply "a"
+    │
+    │  This backs out commit 6d845ed9fb6a3d367e2d7068ef0256b1a10705a9.
+    @  6d845ed9fb6a Back out "a"
+    │
+    │  This backs out commit 2443ea76b0b1c531326908326aab7020abab8e6c.
     ◉  2443ea76b0b1 a
     ◉  000000000000
     "###);
