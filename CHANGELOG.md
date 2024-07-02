@@ -560,6 +560,7 @@ Thanks to the people who made this release happen!
 ## [0.14.0] - 2024-02-07
 
 ### Deprecations
+<div id="deprecate-checkout"></div>
 
 * `jj checkout` and `jj merge` are both deprecated; use `jj new` instead to
   replace both of these commands in all instances.
