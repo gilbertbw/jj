@@ -129,7 +129,7 @@ developers monitor both channels.
 
 ### News and Updates 📣
 
-- **Feb 2024**: Version 0.14 is released, which deprecates ["jj checkout" and "jj merge"](CHANGELOG.md#deprecations-1),
+- **Feb 2024**: Version 0.14 is released, which deprecates ["jj checkout" and "jj merge"](CHANGELOG.md#deprecate-checkout),
   as well as `jj init --git`, which is now just called `jj git init`. 
 - **Oct 2023**: Version 0.10.0 is released! Now includes a bundled merge and
   diff editor for all platforms, "immutable revsets" to avoid accidentally
